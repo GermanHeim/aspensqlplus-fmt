@@ -1,0 +1,93 @@
+{
+  "name": "aspensqlplus-formatter",
+  "displayName": "Aspen SQLplus Formatter",
+  "description": "Format Aspen SQLplus files using a Rust-based CLI formatter",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Formatters"],
+  "main": "dist/extension.js",
+  "activationEvents": [
+  "onLanguage:sql"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "aspensql.formatDocument",
+        "title": "Format Aspen SQLplus Document"
+      }
+    ],
+    "configuration": {
+      "title": "Aspen SQLplus Formatter",
+      "properties": {
+        "aspensqlFmt.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the aspensqlplus-fmt executable. If empty, will try to use one bundled or on PATH."
+        },
+        "aspensqlFmt.lineWidth": {
+          "type": "number",
+          "default": 88,
+          "description": "Maximum line width"
+        },
+        "aspensqlFmt.indent": {
+          "type": "number",
+          "enum": [2, 4],
+          "default": 2,
+          "description": "Indentation spaces"
+        },
+        "aspensqlFmt.uppercaseKeywords": {
+          "type": "boolean",
+          "default": true,
+          "description": "Uppercase SQL keywords"
+        },
+        "aspensqlFmt.autoBuild": {
+          "type": "boolean",
+            "default": true,
+            "description": "Automatically build the Rust formatter if not found (requires cargo in PATH)"
+        },
+        "aspensqlFmt.autoDownload": {
+          "type": "boolean",
+          "default": true,
+          "description": "Attempt to download a prebuilt aspensqlplus-fmt binary when not bundled or locally built"
+        },
+        "aspensqlFmt.version": {
+          "type": "string",
+          "default": "0.1.0",
+          "description": "aspensqlplus-fmt version for remote download (matches GitHub release tag v<version>)"
+        },
+        "aspensqlFmt.enableUnusedVariableDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show warnings for variables declared (DECLARE/SET/LOCAL) but never used"
+        }
+      }
+    },
+    "languages": [
+      {
+        "id": "sql",
+        "extensions": [".sql"],
+        "aliases": ["SQL", "Aspen SQLplus"]
+      }
+  ],
+  "grammars": []
+  },
+  "scripts": {
+  "vscode:prepublish": "npm run build",
+  "build": "tsup src/extension.ts --format cjs --dts --sourcemap --out-dir dist --external vscode",
+  "watch": "tsup src/extension.ts --format cjs --dts --sourcemap --watch --out-dir dist --external vscode",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "eslint": "^9.33.0",
+    "tsup": "^8.0.0",
+  "typescript": "^5.4.0",
+  "@types/adm-zip": "^0.5.5"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.15"
+  }
+}
