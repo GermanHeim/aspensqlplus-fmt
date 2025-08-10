@@ -66,6 +66,12 @@ const KEYWORDS: &[&str] = &[
     "write",
     "record",
     "do",
+    "char",
+    "abs",
+    "max",
+    "min",
+    "timestamp",
+    "update",
 ];
 
 fn build_keyword_regex() -> Regex {

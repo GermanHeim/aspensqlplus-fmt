@@ -1,8 +1,10 @@
+mod diagnostics;
 mod options;
 mod sqlfmt;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use diagnostics::{analyze_variables, format_diagnostics};
 use options::{IndentStyle, Options};
 use std::fs;
 use std::io::{self, Read};
@@ -22,6 +24,10 @@ struct Cli {
     /// Print diff of changes
     #[arg(long)]
     diff: bool,
+
+    /// Check for diagnostics (unused variables, duplicates) without formatting
+    #[arg(long)]
+    check: bool,
 
     /// Maximum line width
     #[arg(long, default_value_t = 88)]
@@ -54,30 +60,49 @@ fn main() -> Result<()> {
     if cli.files.is_empty() {
         let mut buffer = String::new();
         io::stdin().read_to_string(&mut buffer)?;
-        let formatted = sqlfmt::format_sql(&buffer, &opts)?;
-        print!("{}", formatted);
+
+        if cli.check {
+            let diagnostics = analyze_variables(&buffer);
+            if !diagnostics.is_empty() {
+                print!("{}", format_diagnostics(&diagnostics));
+                std::process::exit(1);
+            }
+        } else {
+            let formatted = sqlfmt::format_sql(&buffer, &opts)?;
+            print!("{}", formatted);
+        }
         return Ok(());
     }
 
     for path in cli.files.iter() {
         let input = fs::read_to_string(path)
             .with_context(|| format!("Failed to read file {}", path.display()))?;
-        let formatted = sqlfmt::format_sql(&input, &opts)?;
-        if cli.write {
-            fs::write(path, &formatted)
-                .with_context(|| format!("Failed to write file {}", path.display()))?;
-        } else if cli.diff {
-            let changes = similar::TextDiff::from_lines(&input, &formatted);
-            for change in changes.iter_all_changes() {
-                let sign = match change.tag() {
-                    similar::ChangeTag::Delete => "-",
-                    similar::ChangeTag::Insert => "+",
-                    similar::ChangeTag::Equal => " ",
-                };
-                print!("{}{}", sign, change);
+
+        if cli.check {
+            let diagnostics = analyze_variables(&input);
+            if !diagnostics.is_empty() {
+                eprintln!("{}:", path.display());
+                eprint!("{}", format_diagnostics(&diagnostics));
+                std::process::exit(1);
             }
         } else {
-            print!("{}", formatted);
+            let formatted = sqlfmt::format_sql(&input, &opts)?;
+            if cli.write {
+                fs::write(path, &formatted)
+                    .with_context(|| format!("Failed to write file {}", path.display()))?;
+            } else if cli.diff {
+                let changes = similar::TextDiff::from_lines(&input, &formatted);
+                for change in changes.iter_all_changes() {
+                    let sign = match change.tag() {
+                        similar::ChangeTag::Delete => "-",
+                        similar::ChangeTag::Insert => "+",
+                        similar::ChangeTag::Equal => " ",
+                    };
+                    print!("{}{}", sign, change);
+                }
+            } else {
+                print!("{}", formatted);
+            }
         }
     }
 

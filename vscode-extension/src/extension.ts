@@ -4,7 +4,7 @@ import * as path from "path";
 import { resolveBinary } from "./binaryManager";
 
 function getConfig() {
-  const cfg = vscode.workspace.getConfiguration("aspensqlFmt");
+  const cfg = vscode.workspace.getConfiguration("aspensqlplusfmt");
   return {
     execPath: cfg.get<string>("path") || "",
     lineWidth: cfg.get<number>("lineWidth", 88),
@@ -14,7 +14,42 @@ function getConfig() {
     autoDownload: cfg.get<boolean>("autoDownload", true),
     version: cfg.get<string>("version", "0.1.0"),
     enableUnused: cfg.get<boolean>("enableUnusedVariableDiagnostics", true),
+    enableDuplicates: cfg.get<boolean>(
+      "enableDuplicateVariableDiagnostics",
+      true
+    ),
   };
+}
+
+async function getDiagnostics(document: vscode.TextDocument): Promise<string> {
+  const cfg = getConfig();
+  const exec = await resolveBinary(
+    { globalStorageUri: { fsPath: path.join(__dirname, "..", "..") } } as any, // placeholder
+    {
+      customPath: cfg.execPath,
+      autoBuild: cfg.autoBuild,
+      autoDownload: cfg.autoDownload,
+      version: cfg.version,
+    }
+  );
+  return new Promise((resolve, reject) => {
+    const args = ["--check"];
+
+    const p = spawn(exec, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    p.stdout.on("data", (d) => (out += d.toString()));
+    p.stderr.on("data", (d) => (err += d.toString()));
+    p.on("error", (e) => reject(e));
+    p.on("close", (code) => {
+      // Exit code 1 means diagnostics were found, which is normal
+      if (code === 0 || code === 1) resolve(err || out);
+      else
+        reject(new Error(err || `aspensqlplus-fmt exited with code ${code}`));
+    });
+    p.stdin.write(document.getText());
+    p.stdin.end();
+  });
 }
 
 async function formatDocument(document: vscode.TextDocument): Promise<string> {
@@ -54,9 +89,79 @@ async function formatDocument(document: vscode.TextDocument): Promise<string> {
   });
 }
 
+function parseDiagnostics(
+  diagnosticsOutput: string,
+  document: vscode.TextDocument
+): vscode.Diagnostic[] {
+  const diagnostics: vscode.Diagnostic[] = [];
+  const lines = diagnosticsOutput.trim().split("\n");
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+
+    // Parse format: "line:column:endColumn: severity: message [code]"
+    const match = line.match(
+      /^(\d+):(\d+):(\d+):\s*(error|warning|info):\s*(.*?)\s*\[([^\]]+)\]$/
+    );
+    if (match) {
+      const [, lineStr, columnStr, endColumnStr, severityStr, message, code] =
+        match;
+      const lineNum = parseInt(lineStr) - 1; // Convert to 0-based
+      const column = parseInt(columnStr) - 1; // Convert to 0-based
+      const endColumn = parseInt(endColumnStr) - 1; // Convert to 0-based
+
+      const severity =
+        severityStr === "error"
+          ? vscode.DiagnosticSeverity.Error
+          : severityStr === "warning"
+          ? vscode.DiagnosticSeverity.Warning
+          : vscode.DiagnosticSeverity.Information;
+
+      const range = new vscode.Range(
+        new vscode.Position(lineNum, column),
+        new vscode.Position(lineNum, endColumn)
+      );
+
+      const diagnostic = new vscode.Diagnostic(range, message, severity);
+      diagnostic.code = code;
+      diagnostic.source = "aspensqlplus-fmt";
+      diagnostics.push(diagnostic);
+    }
+  }
+
+  return diagnostics;
+}
+
 export function activate(context: vscode.ExtensionContext) {
-  // Monkey patch formatDocument to receive real context for resolveBinary
-  (formatDocument as any) = async (doc: vscode.TextDocument) => {
+  // Update function references to use the real context
+  const getDiagnosticsWithContext = async (doc: vscode.TextDocument) => {
+    const cfg = getConfig();
+    const exec = await resolveBinary(context, {
+      customPath: cfg.execPath,
+      autoBuild: cfg.autoBuild,
+      autoDownload: cfg.autoDownload,
+      version: cfg.version,
+    });
+    return new Promise<string>((resolve, reject) => {
+      const args = ["--check"];
+      const p = spawn(exec, args, { stdio: ["pipe", "pipe", "pipe"] });
+      let out = "";
+      let err = "";
+      p.stdout.on("data", (d) => (out += d.toString()));
+      p.stderr.on("data", (d) => (err += d.toString()));
+      p.on("error", (e) => reject(e));
+      p.on("close", (code) => {
+        // Exit code 1 means diagnostics were found, which is normal
+        if (code === 0 || code === 1) resolve(err || out);
+        else
+          reject(new Error(err || `aspensqlplus-fmt exited with code ${code}`));
+      });
+      p.stdin.write(doc.getText());
+      p.stdin.end();
+    });
+  };
+
+  const formatDocumentWithContext = async (doc: vscode.TextDocument) => {
     const cfg = getConfig();
     const exec = await resolveBinary(context, {
       customPath: cfg.execPath,
@@ -88,6 +193,7 @@ export function activate(context: vscode.ExtensionContext) {
       p.stdin.end();
     });
   };
+
   const selector: vscode.DocumentSelector = [
     { language: "sql", scheme: "file" },
     { language: "sql", scheme: "untitled" },
@@ -96,7 +202,7 @@ export function activate(context: vscode.ExtensionContext) {
   const provider: vscode.DocumentFormattingEditProvider = {
     provideDocumentFormattingEdits: async (doc) => {
       try {
-        const formatted = await formatDocument(doc);
+        const formatted = await formatDocumentWithContext(doc);
         const fullRange = new vscode.Range(
           doc.positionAt(0),
           doc.positionAt(doc.getText().length)
@@ -132,61 +238,42 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // Diagnostics: unused variables (simple heuristic)
-  const diagCollection =
-    vscode.languages.createDiagnosticCollection("aspensql-unused");
+  // Diagnostics using Rust implementation
+  const diagCollection = vscode.languages.createDiagnosticCollection(
+    "aspensql-diagnostics"
+  );
   context.subscriptions.push(diagCollection);
 
-  function refreshDiagnostics(doc: vscode.TextDocument) {
+  async function refreshDiagnostics(doc: vscode.TextDocument) {
     const cfg = getConfig();
-    if (doc.languageId !== "sql" || !cfg.enableUnused) {
+    if (
+      doc.languageId !== "sql" ||
+      (!cfg.enableUnused && !cfg.enableDuplicates)
+    ) {
       diagCollection.delete(doc.uri);
       return;
     }
-    const text = doc.getText();
-    // Capture variable declarations: DECLARE var_name / SET var_name / LOCAL var_name
-    const declRegex = /\b(DECLARE|SET|LOCAL)\s+([a-zA-Z_][a-zA-Z0-9_]*)/gi;
-    const usages = new Map<string, number>();
-    const declarations: { name: string; index: number }[] = [];
-    let m: RegExpExecArray | null;
-    while ((m = declRegex.exec(text)) !== null) {
-      const name = m[2];
-      declarations.push({ name, index: m.index });
-      usages.set(name.toLowerCase(), 0);
+
+    try {
+      const diagnosticsOutput = await getDiagnosticsWithContext(doc);
+      const diagnostics = parseDiagnostics(diagnosticsOutput, doc);
+
+      // Filter diagnostics based on configuration
+      const filteredDiagnostics = diagnostics.filter((diag) => {
+        if (diag.code === "duplicate-variable") {
+          return cfg.enableDuplicates;
+        }
+        if (diag.code === "unused-variable") {
+          return cfg.enableUnused;
+        }
+        return true;
+      });
+
+      diagCollection.set(doc.uri, filteredDiagnostics);
+    } catch (error) {
+      // If diagnostics fail, just clear any existing ones
+      diagCollection.delete(doc.uri);
     }
-    if (declarations.length === 0) {
-      diagCollection.set(doc.uri, []);
-      return;
-    }
-    // Count usages (excluding the declaration positions) - simplistic word boundary match
-    for (const [lower] of usages) {
-      const usageRegex = new RegExp(`\\b${lower}\\b`, "gi");
-      let u: RegExpExecArray | null;
-      while ((u = usageRegex.exec(text)) !== null) {
-        // Skip if this position is part of a declaration word we already logged
-        // We allow one occurrence (the declaration) without counting
-        usages.set(lower, (usages.get(lower) || 0) + 1);
-      }
-      // Subtract one for its own declaration if found at least once
-      const adjusted = (usages.get(lower) || 0) - 1;
-      usages.set(lower, adjusted < 0 ? 0 : adjusted);
-    }
-    const diags: vscode.Diagnostic[] = [];
-    for (const decl of declarations) {
-      const count = usages.get(decl.name.toLowerCase()) || 0;
-      if (count === 0) {
-        const start = doc.positionAt(decl.index);
-        const end = doc.positionAt(decl.index + decl.name.length + 1); // rough span
-        diags.push(
-          new vscode.Diagnostic(
-            new vscode.Range(start, end),
-            `Unused variable '${decl.name}'`,
-            vscode.DiagnosticSeverity.Warning
-          )
-        );
-      }
-    }
-    diagCollection.set(doc.uri, diags);
   }
 
   context.subscriptions.push(
